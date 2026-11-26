@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Carbon 2185 — Entity & Chroma-Key Card Test (Task 3.3)</title>
+  <style>
+    body {
+      margin: 0; min-height: 100vh; color: #e2f1ff; font-family: system-ui, sans-serif;
+      background: linear-gradient(135deg, #060b19 0%, #1a0b2e 50%, #071b24 100%);
+      padding: 24px; box-sizing: border-box;
+    }
+    .panel {
+      max-width: 520px; background: rgba(8, 14, 28, 0.88);
+      border: 1px solid #00f0ff; border-radius: 12px; padding: 18px;
+      box-shadow: 0 0 24px rgba(0, 240, 255, 0.18);
+    }
+    h1 { margin: 0 0 8px; font-size: 16px; color: #00f0ff; text-transform: uppercase; letter-spacing: 0.06em; }
+    p { margin: 0 0 12px; font-size: 13px; color: #94a3b8; }
+    .row { display: flex; gap: 8px; margin-bottom: 14px; }
+    input {
+      flex: 1; background: #0f172a; border: 1px solid #38bdf8; border-radius: 6px;
+      color: #fff; padding: 8px 10px; font-size: 13px;
+    }
+    button {
+      background: #00f0ff; color: #050811; border: none; border-radius: 6px;
+      padding: 8px 14px; font-weight: 700; cursor: pointer; font-size: 12px;
+    }
+    #quick-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      background: #0f172a; color: #e2f1ff; border: 1px solid #334155;
+      font-weight: 500; padding: 5px 9px;
+    }
+    .chip:hover { border-color: #ff2a85; color: #ff9ec7; }
+    #msg { font-size: 12px; color: #fbbf24; margin-bottom: 10px; min-height: 16px; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>Entity Card & Chroma-Key Test (Task 3.3)</h1>
+    <p>Type any Weapon, Armor, NPC, Organization, Gang, or Character name from your sheet—or click a quick-test button below:</p>
+    <div class="row">
+      <input id="query" type="text" placeholder="e.g., Resin Pistol, Blake, KHMA..." />
+      <button id="lookup-btn">Inspect</button>
+    </div>
+    <div id="msg">Loading carbon2185-db.json...</div>
+    <div id="quick-list"></div>
+  </div>
+
+  <script type="module">
+    import { AssetResolver } from "./assetResolver.js";
+    import { EntityOverlay } from "./entityOverlay.js";
+
+    const msgEl = document.getElementById("msg");
+    const quickEl = document.getElementById("quick-list");
+    const inputEl = document.getElementById("query");
+
+    const resolver = new AssetResolver();
+    const overlay = new EntityOverlay(resolver);
+
+    async function inspect(name) {
+      msgEl.textContent = "";
+      try {
+        await overlay.showTarget(name);
+      } catch (err) {
+        msgEl.textContent = err.message;
+      }
+    }
+
+    document.getElementById("lookup-btn").onclick = () => inspect(inputEl.value);
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") inspect(inputEl.value);
+    });
+
+    async function boot() {
+      await resolver.init(true);
+      const cats = ["Weapons", "Armor", "People", "Organizations", "Gangs", "Premade_Characters"];
+      const withImages = cats.flatMap((c) =>
+        resolver.getCollection(c).filter((e) => e.image_2d && e.image_status !== "PLACEHOLDER")
+      );
+
+      msgEl.textContent = `Database ready (${resolver.allEntities.length} total entities, ${withImages.length} with uploaded images).`;
+
+      // Show up to 12 quick-test chips for entities that already have uploaded images
+      withImages.slice(0, 12).forEach((item) => {
+        const btn = document.createElement("button");
+        btn.className = "chip";
+        btn.textContent = `${item.name} (${item.category})`;
+        btn.onclick = () => inspect(item.name);
+        quickEl.appendChild(btn);
+      });
+    }
+
+    boot();
+  </script>
+</body>
+</html>

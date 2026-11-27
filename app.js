@@ -1,4 +1,4 @@
-// app.js — 360° Skybox, Pin-Drop Investigation, Tech Roll Reveal, Acquired Object Showcase & 3D WebXR Visor
+// app.js — 360° Skybox, Seated VR Spin, Head-Following 3D VR HUD, VR Item Showcase & Cache-First Audio
 import * as THREE from "three";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { AssetResolver } from "./assetResolver.js";
@@ -21,9 +21,13 @@ const tts = new ElevenLabsClient({ onStatus: (msg) => { statusEl.textContent = m
 
 const gameState = { location: null, character: null, level: 1, activePinDir: null };
 
-// --- 1. Three.js Scene, Camera & WebXR Renderer ---
+// --- 1. Three.js Scene, Rotatable World Group & WebXR Renderer ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050811);
+
+// Holds skybox, grid, pins, and markers so seated VR grab-to-spin rotates everything together
+const worldGroup = new THREE.Group();
+scene.add(worldGroup);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1100);
 camera.position.set(0, 0, 0);
@@ -38,12 +42,12 @@ document.body.appendChild(VRButton.createButton(renderer));
 const skyGeo = new THREE.SphereGeometry(500, 60, 40);
 skyGeo.scale(-1, 1, 1);
 const skyMat = new THREE.MeshBasicMaterial({ color: 0x0b1120, transparent: true, opacity: 1 });
-scene.add(new THREE.Mesh(skyGeo, skyMat));
+worldGroup.add(new THREE.Mesh(skyGeo, skyMat));
 
 const fallbackGrid = new THREE.GridHelper(60, 40, 0x00f0ff, 0x1e293b);
 fallbackGrid.position.y = -4;
 fallbackGrid.visible = false;
-scene.add(fallbackGrid);
+worldGroup.add(fallbackGrid);
 
 const textureLoader = new THREE.TextureLoader();
 textureLoader.setCrossOrigin("anonymous");
@@ -64,28 +68,44 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+function lookupEntityRecord(query) {
+  const q = String(query || "").toLowerCase().trim();
+  const tabs = ["Weapons", "Armor", "People", "Locations", "Organizations", "Gangs", "Premade_Characters"];
+  let partial = null;
+  for (const tab of tabs) {
+    const items = resolver.getCollection(tab) || [];
+    for (const item of items) {
+      const name = String(item.name || "").toLowerCase();
+      if (name === q) return item;
+      if (!partial && name.includes(q)) partial = item;
+    }
+  }
+  return partial;
+}
+
 async function runInspect(query) {
   const q = String(query || inspectInput.value || "").trim();
   if (!q) return;
   inspectInput.value = q;
   try {
     await overlay.showTarget(q);
+    const entity = lookupEntityRecord(q);
+    if (entity) hotspots.showVRInspectCard(entity);
     statusEl.textContent = `Inspecting: ${q}`;
   } catch (err) {
     statusEl.textContent = err.message;
   }
 }
 
-// --- 3. Pin-Based Skill Action Handler (with Tech Reveal + Acquired Object Showcase) ---
+// --- 3. Pin-Based Skill Action Handler (Desktop + Elevated VR Reveal + VR Item Showcase) ---
 async function executePinAction(skill) {
   const result =
     skill === "Investigation"
       ? dm.investigatePin({ pinDir: gameState.activePinDir, character: gameState.character, level: gameState.level })
       : dm.resolvePinAction({ skill, pinDir: gameState.activePinDir, character: gameState.character, level: gameState.level });
 
-  // Show brief scanning state on 3D VR HUD while desktop reveal animation runs
-  hotspots.updateVRHud(`SCANNING ${skill.toUpperCase()}...`, dm.vitals, "Decrypting neural telemetry...");
-
+  // Run 700ms telemetry scan on both Desktop and 3D VR HUD simultaneously
+  hotspots.startVRScan(skill, dm.vitals);
   await visorHud.showRollResult(result);
 
   if (skill === "Investigation" && result.success && result.poi) {
@@ -100,9 +120,9 @@ async function executePinAction(skill) {
   const vrHeadline = result.autofail
     ? `${skill.toUpperCase()} — AUTOFAIL`
     : `${skill.toUpperCase()}: ${result.total} vs DC ${result.dc} (${result.success ? "SUCCESS" : "FAIL"})`;
-  hotspots.updateVRHud(vrHeadline, result.vitals, result.narrative);
+  const vrBorder = result.success ? "#00f0ff" : "#ff2a85";
+  hotspots.updateVRHud(vrHeadline, result.vitals, result.narrative, null, vrBorder);
 
-  // If a new object was acquired, pop open the Inspect Entity Overlay with its stats & add to Quick Inspect
   if (result.acquiredItem) {
     visorHud.addGearPill(result.acquiredItem, true);
     await runInspect(result.acquiredItem);
@@ -117,8 +137,8 @@ async function executePinAction(skill) {
   });
 }
 
-// --- 4. Hotspots (Pin-Drop + 3D VR HUD) & Desktop Visor HUD ---
-const hotspots = new HotspotManager(scene, camera, renderer, {
+// --- 4. Hotspots (Pin-Drop + Head-Following 3D VR HUD) & Desktop Visor HUD ---
+const hotspots = new HotspotManager(scene, worldGroup, camera, renderer, {
   onPinDropped: (pinDir, yaw, pitch) => {
     gameState.activePinDir = pinDir;
     const msg = `PIN DROPPED (Yaw ${yaw}°, Pitch ${pitch}°) — Choose Investigate, Hack, or Attack.`;
@@ -150,12 +170,17 @@ const visorHud = new VisorHud({
 function loadLocationSkybox(location) {
   gameState.location = location;
   gameState.activePinDir = null;
+  worldGroup.rotation.y = 0;
   locLabelEl.textContent = location.name;
 
   hotspots.clearSceneMarkers();
   dm.initLocationPOIs(location);
   visorHud.setPinStatus("PIN: Click anywhere in the 360° scene to drop a target pin.");
-  hotspots.updateVRHud(`Scene: ${location.name}`, dm.vitals, "Point laser & pull trigger to drop a search pin.");
+  hotspots.updateVRHud(
+    `Scene: ${location.name}`,
+    dm.vitals,
+    "Trigger: Drop Pin  •  Grip + Drag (or Stick): Spin Room"
+  );
 
   if (!location.image_360) {
     skyMat.map = null; skyMat.color.setHex(0x070d1f); skyMat.needsUpdate = true;
@@ -221,7 +246,7 @@ document.getElementById("hud-inspect-btn").onclick = () => runInspect();
 inspectInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runInspect(); });
 document.getElementById("hud-menu-btn").onclick = () => charSelect.show();
 
-window.C2185 = { gameState, resolver, overlay, tts, dm, hotspots, visorHud, loadLocationSkybox };
+window.C2185 = { gameState, resolver, overlay, tts, dm, hotspots, visorHud, worldGroup, loadLocationSkybox };
 
 async function boot() {
   await Promise.all([charSelect.init(), tts.init(true)]);

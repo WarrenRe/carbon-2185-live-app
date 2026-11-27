@@ -1,23 +1,15 @@
-// elevenLabsClient.js — Cache-First Audio Engine, Zero-Exposure Cloudflare Proxy, Auto-Logger & Quota Fallback
+// elevenLabsClient.js — Cache-First Audio Engine, Safe Cache-Only Mode & Cloudflare Proxy
 const DEFAULT_MANIFEST_URL =
   "https://raw.githubusercontent.com/WarrenRe/carbasset/main/assets/audio/audio-manifest.json";
 const DEFAULT_PROXY_URL = "https://carbon-2185-tts-proxy.warrencreid.workers.dev";
-const MAX_CHARS_PER_CLIP = 220; // ~5–10 seconds max
+const MAX_CHARS_PER_CLIP = 220;
 
 function toSlug(text) {
-  return String(text || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return String(text || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 function normalizeText(text) {
-  return String(text || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(text || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
 }
 
 export class ElevenLabsClient {
@@ -30,7 +22,7 @@ export class ElevenLabsClient {
 
     this.manifest = null;
     this.clips = [];
-    this.archiveLog = []; // Newly generated clips ready to download into carbasset
+    this.archiveLog = [];
     this.currentAudio = null;
     this.abortController = null;
     this.quota = { usedChars: 0, dailyLimit: 2500, remainingChars: 2500 };
@@ -40,9 +32,7 @@ export class ElevenLabsClient {
     if (this.manifest && !forceRefresh) return this.manifest;
     const bust = forceRefresh ? `?t=${Date.now()}` : "";
     const res = await fetch(`${this.manifestUrl}${bust}`);
-    if (!res.ok) {
-      throw new Error(`Failed to load audio-manifest.json (HTTP ${res.status})`);
-    }
+    if (!res.ok) throw new Error(`Failed to load audio-manifest.json (HTTP ${res.status})`);
     this.manifest = await res.json();
     this.clips = this.manifest.clips || [];
     return this.manifest;
@@ -75,20 +65,13 @@ export class ElevenLabsClient {
       this.currentAudio.src = "";
       this.currentAudio = null;
     }
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   }
 
-  /**
-   * Cache-first lookup in audio-manifest.json:
-   * 1) Exact normalized text match (same speaker/role preferred)
-   * 2) Exact (speaker + intent) match
-   * 3) Exact (role + intent) match
-   */
   findCachedClip({ text = "", speaker = "", role = "Narrator", intent = "" }) {
     const normText = normalizeText(text);
     const spkSlug = toSlug(speaker);
+    const normIntent = String(intent || "").toLowerCase();
 
     if (normText) {
       const exactText = this.clips.find(
@@ -97,25 +80,21 @@ export class ElevenLabsClient {
       if (exactText) return exactText;
     }
 
-    if (intent) {
+    if (normIntent) {
       if (spkSlug) {
-        const bySpeakerIntent = this.clips.find(
-          (c) => toSlug(c.speaker) === spkSlug && c.intent === intent
+        const bySpk = this.clips.find(
+          (c) => toSlug(c.speaker) === spkSlug && String(c.intent || "").toLowerCase().includes(normIntent)
         );
-        if (bySpeakerIntent) return bySpeakerIntent;
+        if (bySpk) return bySpk;
       }
-      const byRoleIntent = this.clips.find(
-        (c) => c.role === role && c.intent === intent
+      const byRole = this.clips.find(
+        (c) => c.role === role && String(c.intent || "").toLowerCase().includes(normIntent)
       );
-      if (byRoleIntent) return byRoleIntent;
+      if (byRole) return byRole;
     }
-
     return null;
   }
 
-  /**
-   * Picks the best pre-downloaded fallback clip when daily quota is hit or offline.
-   */
   findFallbackClip({ speaker = "", role = "Narrator", intent = "" }) {
     const spkSlug = toSlug(speaker);
     return (
@@ -128,12 +107,6 @@ export class ElevenLabsClient {
     );
   }
 
-  /**
-   * Main playback entry point:
-   * 1. Check audio-manifest.json (0 API calls on hit)
-   * 2. On miss, stream through Cloudflare Worker proxy (5–10s cap) & log clip for GitHub archiving
-   * 3. On daily quota limit (429) or error, fall back to pre-downloaded carbasset audio clip
-   */
   async speak(text, options = {}) {
     await this.init();
     this.stop();
@@ -141,9 +114,9 @@ export class ElevenLabsClient {
     const role = options.role || "Narrator";
     const speaker = options.speaker || (role === "Narrator" ? "narrator" : `${role.toLowerCase()}-generic`);
     const intent = options.intent || "";
+    const cacheOnly = Boolean(options.cacheOnly);
     const simulateQuotaExceeded = Boolean(options.simulateQuotaExceeded);
 
-    // Enforce 5–10 second (~220 char) guardrail on the client too
     let cleanText = String(text || "").trim();
     if (cleanText.length > MAX_CHARS_PER_CLIP) {
       cleanText = cleanText.slice(0, MAX_CHARS_PER_CLIP).replace(/\s+\S*$/, "") + ".";
@@ -151,53 +124,42 @@ export class ElevenLabsClient {
 
     const startTime = performance.now();
 
-    // 1. CACHE-FIRST CHECK (0 ElevenLabs API calls)
+    // 1. CACHE-FIRST CHECK (0 API calls)
     const cached = this.findCachedClip({ text: cleanText, speaker, role, intent });
     if (cached && !options.forceLive) {
       this.onStatus(`CACHE HIT (0 API calls) — Playing ${cached.file}`);
       await this._playUrl(cached.url);
-      return {
-        engine: "github-cache",
-        cached: true,
-        clip: cached,
-        latencyMs: Math.round(performance.now() - startTime),
-      };
+      return { engine: "github-cache", cached: true, clip: cached, latencyMs: Math.round(performance.now() - startTime) };
     }
 
-    // 2. SIMULATED OR KNOWN DAILY QUOTA EXCEEDED -> CACHED CLIP FALLBACK
+    // 2. CACHE-ONLY MODE OR EMPTY TEXT: Never hit Cloudflare proxy (prevents HTTP 400 EMPTY_TEXT)
+    if (cacheOnly || !cleanText) {
+      return this._playCachedFallback({ speaker, role, intent, reason: "Cached audio mode", text: cleanText });
+    }
+
     if (simulateQuotaExceeded || !navigator.onLine) {
-      const reason = simulateQuotaExceeded ? "Daily quota test" : "Offline";
-      return this._playCachedFallback({ speaker, role, intent, reason, text: cleanText });
+      return this._playCachedFallback({
+        speaker, role, intent,
+        reason: simulateQuotaExceeded ? "Daily quota test" : "Offline",
+        text: cleanText,
+      });
     }
 
-    // 3. STREAM-ON-MISS VIA SECURE CLOUDFLARE WORKER PROXY
+    // 3. LIVE STREAM VIA CLOUDFLARE PROXY
     this.abortController = new AbortController();
     try {
       this.onStatus(`Cache miss — Streaming ${role} via Cloudflare proxy...`);
-
       const response = await fetch(this.proxyUrl, {
         method: "POST",
         signal: this.abortController.signal,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: cleanText,
-          role,
-          voiceId: options.voiceId || undefined,
-        }),
+        body: JSON.stringify({ text: cleanText, role, voiceId: options.voiceId || undefined }),
       });
 
       this._syncQuotaHeaders(response.headers);
-
       if (response.status === 429) {
-        return this._playCachedFallback({
-          speaker,
-          role,
-          intent,
-          reason: "Daily quota exceeded",
-          text: cleanText,
-        });
+        return this._playCachedFallback({ speaker, role, intent, reason: "Daily quota exceeded", text: cleanText });
       }
-
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
         throw new Error(`Proxy HTTP ${response.status} ${errText.slice(0, 120)}`);
@@ -205,65 +167,35 @@ export class ElevenLabsClient {
 
       const audioBlob = await response.blob();
       const blobUrl = URL.createObjectURL(audioBlob);
-
-      // Log for one-click download into carbasset/assets/audio/
-      const archiveEntry = this._recordArchiveEntry({
-        text: cleanText,
-        speaker,
-        role,
-        intent: intent || "dynamic",
-        blob: audioBlob,
-        blobUrl,
-      });
+      const archiveEntry = this._recordArchiveEntry({ text: cleanText, speaker, role, intent: intent || "dynamic", blob: audioBlob, blobUrl });
 
       await this._playUrl(blobUrl);
       const latencyMs = Math.round(performance.now() - startTime);
-      this.onStatus(
-        `LIVE STREAM (${role}) — ${latencyMs}ms | Logged as ${archiveEntry.filename} | Remaining today: ${this.quota.remainingChars} chars`
-      );
-
-      return {
-        engine: "cloudflare-elevenlabs-proxy",
-        cached: false,
-        archiveEntry,
-        latencyMs,
-      };
+      this.onStatus(`LIVE STREAM (${role}) — ${latencyMs}ms | Remaining: ${this.quota.remainingChars} chars`);
+      return { engine: "cloudflare-elevenlabs-proxy", cached: false, archiveEntry, latencyMs };
     } catch (err) {
-      if (err.name === "AbortError") {
-        return { engine: "aborted", latencyMs: 0 };
-      }
-      console.warn("Proxy TTS failed, falling back to cached clip:", err.message);
-      return this._playCachedFallback({
-        speaker,
-        role,
-        intent,
-        reason: err.message,
-        text: cleanText,
-      });
+      if (err.name === "AbortError") return { engine: "aborted", latencyMs: 0 };
+      return this._playCachedFallback({ speaker, role, intent, reason: err.message, text: cleanText });
     }
   }
 
   async _playCachedFallback({ speaker, role, intent, reason, text }) {
     const fallbackClip = this.findFallbackClip({ speaker, role, intent });
     if (fallbackClip) {
-      this.onStatus(`FALLBACK (${reason}) — Playing pre-downloaded clip: ${fallbackClip.file}`);
+      this.onStatus(`CACHED AUDIO (${reason}) — ${fallbackClip.file}`);
       try {
         await this._playUrl(fallbackClip.url);
         return { engine: "cached-fallback", clip: fallbackClip, reason };
       } catch (e) {
-        console.warn("Cached MP3 playback failed, using Web Speech backup:", e.message);
+        console.warn("Cached MP3 playback failed:", e.message);
       }
     }
-
-    // Secondary backup: Browser Web Speech API
     if ("speechSynthesis" in window && text) {
       this.onStatus(`WEB SPEECH BACKUP (${reason})`);
-      const utterance = new SpeechSynthesisUtterance(text);
-      window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
       return { engine: "webspeech-backup", reason };
     }
-
-    this.onStatus(`TEXT-ONLY FALLBACK (${reason})`);
+    this.onStatus(`TEXT-ONLY (${reason})`);
     return { engine: "text-only", reason };
   }
 
@@ -282,11 +214,7 @@ export class ElevenLabsClient {
     const limit = parseInt(headers.get("X-Quota-Limit"), 10);
     const remaining = parseInt(headers.get("X-Quota-Remaining"), 10);
     if (!Number.isNaN(used) && !Number.isNaN(limit)) {
-      this.quota = {
-        usedChars: used,
-        dailyLimit: limit,
-        remainingChars: Number.isNaN(remaining) ? Math.max(0, limit - used) : remaining,
-      };
+      this.quota = { usedChars: used, dailyLimit: limit, remainingChars: Number.isNaN(remaining) ? Math.max(0, limit - used) : remaining };
       this.onQuotaUpdate(this.quota);
     }
   }
@@ -298,32 +226,12 @@ export class ElevenLabsClient {
     const folder = isNarrator ? "narrator" : `characters/${spkSlug}`;
     const filename = isNarrator ? `nar-${textSlug}.mp3` : `${spkSlug}-${textSlug}.mp3`;
     const relPath = `${folder}/${filename}`;
-    const baseUrl =
-      this.manifest?.meta?.base_url ||
-      "https://raw.githubusercontent.com/WarrenRe/carbasset/main/assets/audio/";
-
-    const manifestSnippet = {
-      id: filename.replace(/\.mp3$/, ""),
-      speaker: spkSlug,
-      role,
-      intent,
-      text,
-      file: relPath,
-      url: `${baseUrl}${relPath}`,
-    };
-
+    const baseUrl = this.manifest?.meta?.base_url || "https://raw.githubusercontent.com/WarrenRe/carbasset/main/assets/audio/";
     const entry = {
-      filename,
-      folder: `assets/audio/${folder}/`,
-      text,
-      role,
-      speaker: spkSlug,
-      blob,
-      blobUrl,
-      manifestSnippet,
+      filename, folder: `assets/audio/${folder}/`, text, role, speaker: spkSlug, blob, blobUrl,
+      manifestSnippet: { id: filename.replace(/\.mp3$/, ""), speaker: spkSlug, role, intent, text, file: relPath, url: `${baseUrl}${relPath}` },
       createdAt: new Date().toLocaleTimeString(),
     };
-
     this.archiveLog.unshift(entry);
     this.onArchiveLog(entry, this.archiveLog);
     return entry;

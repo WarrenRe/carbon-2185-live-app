@@ -1,4 +1,4 @@
-// app.js — Phase 4 Playable Vertical Slice (360° Skybox, Hotspots, Visor HUD, AI DM & Cache-First Audio)
+// app.js — 360° Skybox, Pin-Drop Investigation, Tech Roll Reveal, Acquired Object Showcase & 3D WebXR Visor
 import * as THREE from "three";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { AssetResolver } from "./assetResolver.js";
@@ -17,13 +17,9 @@ const inspectInput = document.getElementById("hud-inspect-input");
 const resolver = new AssetResolver();
 const overlay = new EntityOverlay(resolver);
 const dm = new DMEngine();
-const tts = new ElevenLabsClient({
-  onStatus: (msg) => {
-    statusEl.textContent = msg;
-  },
-});
+const tts = new ElevenLabsClient({ onStatus: (msg) => { statusEl.textContent = msg; } });
 
-const gameState = { location: null, character: null, level: 1 };
+const gameState = { location: null, character: null, level: 1, activePinDir: null };
 
 // --- 1. Three.js Scene, Camera & WebXR Renderer ---
 const scene = new THREE.Scene();
@@ -54,18 +50,12 @@ textureLoader.setCrossOrigin("anonymous");
 
 // --- 2. Desktop Mouse / Touch 360° Drag Look ---
 let isDragging = false, prevX = 0, prevY = 0, lon = 0, lat = 0;
-
-renderer.domElement.addEventListener("pointerdown", (e) => {
-  isDragging = true;
-  prevX = e.clientX;
-  prevY = e.clientY;
-});
+renderer.domElement.addEventListener("pointerdown", (e) => { isDragging = true; prevX = e.clientX; prevY = e.clientY; });
 window.addEventListener("pointermove", (e) => {
   if (!isDragging || renderer.xr.isPresenting) return;
   lon += (prevX - e.clientX) * 0.22;
   lat = Math.max(-85, Math.min(85, lat + (e.clientY - prevY) * 0.22));
-  prevX = e.clientX;
-  prevY = e.clientY;
+  prevX = e.clientX; prevY = e.clientY;
 });
 window.addEventListener("pointerup", () => { isDragging = false; });
 window.addEventListener("resize", () => {
@@ -73,26 +63,6 @@ window.addEventListener("resize", () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
-
-// --- 3. Interactive Skill Check & Narration Handler ---
-async function triggerSkillCheck(checkConfig) {
-  const result = dm.resolveCheck({
-    ...checkConfig,
-    character: gameState.character,
-    level: gameState.level,
-  });
-
-  visorHud.updateVitals(result.vitals);
-  visorHud.showRollResult(result);
-
-  if (visorHud.liveVoiceEnabled) {
-    // Streams the custom outcome line via Cloudflare proxy (logs clip for archiving)
-    await tts.speak(result.narrative, { role: "Narrator", speaker: "narrator" });
-  } else {
-    // 0 API calls: plays matching pre-downloaded success/failure clip from carbasset
-    await tts.speak("", { role: "Narrator", speaker: "narrator", intent: result.cacheIntent });
-  }
-}
 
 async function runInspect(query) {
   const q = String(query || inspectInput.value || "").trim();
@@ -106,21 +76,60 @@ async function runInspect(query) {
   }
 }
 
-// --- 4. Hotspots & Visor HUD ---
-const hotspots = new HotspotManager(scene, camera, renderer, (hs) => {
-  triggerSkillCheck({
-    label: hs.label,
-    skill: hs.skill,
-    dc: hs.dc,
-    successLine: hs.successLine,
-    failLine: hs.failLine,
+// --- 3. Pin-Based Skill Action Handler (with Tech Reveal + Acquired Object Showcase) ---
+async function executePinAction(skill) {
+  const result =
+    skill === "Investigation"
+      ? dm.investigatePin({ pinDir: gameState.activePinDir, character: gameState.character, level: gameState.level })
+      : dm.resolvePinAction({ skill, pinDir: gameState.activePinDir, character: gameState.character, level: gameState.level });
+
+  // Show brief scanning state on 3D VR HUD while desktop reveal animation runs
+  hotspots.updateVRHud(`SCANNING ${skill.toUpperCase()}...`, dm.vitals, "Decrypting neural telemetry...");
+
+  await visorHud.showRollResult(result);
+
+  if (skill === "Investigation" && result.success && result.poi) {
+    hotspots.markDiscoveredPOI(result.poi);
+    visorHud.setPinStatus(`TARGET LOCKED: ${result.poi.label} — Select Hack or Attack.`);
+  } else if (skill === "Investigation" && result.burnedPinDir) {
+    hotspots.markBurnedSpot(result.burnedPinDir);
+  }
+
+  visorHud.updateVitals(result.vitals);
+
+  const vrHeadline = result.autofail
+    ? `${skill.toUpperCase()} — AUTOFAIL`
+    : `${skill.toUpperCase()}: ${result.total} vs DC ${result.dc} (${result.success ? "SUCCESS" : "FAIL"})`;
+  hotspots.updateVRHud(vrHeadline, result.vitals, result.narrative);
+
+  // If a new object was acquired, pop open the Inspect Entity Overlay with its stats & add to Quick Inspect
+  if (result.acquiredItem) {
+    visorHud.addGearPill(result.acquiredItem, true);
+    await runInspect(result.acquiredItem);
+    statusEl.textContent = `ACQUIRED: ${result.acquiredItem} — Stats displayed & added to Quick Inspect.`;
+  }
+
+  await tts.speak(result.narrative, {
+    role: "Narrator",
+    speaker: "narrator",
+    intent: result.cacheIntent,
+    cacheOnly: !visorHud.liveVoiceEnabled,
   });
+}
+
+// --- 4. Hotspots (Pin-Drop + 3D VR HUD) & Desktop Visor HUD ---
+const hotspots = new HotspotManager(scene, camera, renderer, {
+  onPinDropped: (pinDir, yaw, pitch) => {
+    gameState.activePinDir = pinDir;
+    const msg = `PIN DROPPED (Yaw ${yaw}°, Pitch ${pitch}°) — Choose Investigate, Hack, or Attack.`;
+    visorHud.setPinStatus(msg);
+    hotspots.updateVRHud(`Pin Set (Yaw ${yaw}°, Pitch ${pitch}°)`, dm.vitals, "Select INVESTIGATE, HACK, or ATTACK below.");
+  },
+  onVrAction: (skill) => executePinAction(skill),
 });
 
 const visorHud = new VisorHud({
-  onAction: (skill) => {
-    triggerSkillCheck({ label: `Quick ${skill}`, skill, dc: 12 });
-  },
+  onAction: (skill) => executePinAction(skill),
   onInspect: (name) => runInspect(name),
   onVoiceCommand: (transcript) => {
     const cmd = transcript.toLowerCase();
@@ -128,27 +137,30 @@ const visorHud = new VisorHud({
     if (cmd.includes("inspect ") || cmd.includes("show ")) {
       runInspect(cmd.replace(/^.*?(inspect|show)\s+/i, "").trim());
     } else if (cmd.includes("hack")) {
-      triggerSkillCheck({ label: "Voice Hack", skill: "Hack", dc: 13 });
+      executePinAction("Hack");
     } else if (cmd.includes("attack") || cmd.includes("shoot") || cmd.includes("strike")) {
-      triggerSkillCheck({ label: "Voice Attack", skill: "Attack", dc: 14 });
+      executePinAction("Attack");
     } else {
-      triggerSkillCheck({ label: "Voice Investigate", skill: "Investigation", dc: 12 });
+      executePinAction("Investigation");
     }
   },
 });
 
-// --- 5. Load 360° Skybox + Hotspots ---
+// --- 5. Load 360° Skybox & Reset Hidden POIs ---
 function loadLocationSkybox(location) {
   gameState.location = location;
+  gameState.activePinDir = null;
   locLabelEl.textContent = location.name;
-  hotspots.setHotspots(dm.getHotspotsForLocation(location));
+
+  hotspots.clearSceneMarkers();
+  dm.initLocationPOIs(location);
+  visorHud.setPinStatus("PIN: Click anywhere in the 360° scene to drop a target pin.");
+  hotspots.updateVRHud(`Scene: ${location.name}`, dm.vitals, "Point laser & pull trigger to drop a search pin.");
 
   if (!location.image_360) {
-    skyMat.map = null;
-    skyMat.color.setHex(0x070d1f);
-    skyMat.needsUpdate = true;
+    skyMat.map = null; skyMat.color.setHex(0x070d1f); skyMat.needsUpdate = true;
     fallbackGrid.visible = true;
-    statusEl.textContent = `Loaded ${location.name} (neural grid + 3 interactive hotspots).`;
+    statusEl.textContent = `Loaded ${location.name} (neural grid active — click to drop a pin).`;
     return;
   }
 
@@ -157,12 +169,8 @@ function loadLocationSkybox(location) {
     location.image_360,
     (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
-      skyMat.map = tex;
-      skyMat.color.setHex(0xffffff);
-      skyMat.opacity = 0;
-      skyMat.needsUpdate = true;
+      skyMat.map = tex; skyMat.color.setHex(0xffffff); skyMat.opacity = 0; skyMat.needsUpdate = true;
       fallbackGrid.visible = false;
-
       const start = performance.now();
       function fade(now) {
         const t = Math.min(1, (now - start) / 500);
@@ -170,7 +178,7 @@ function loadLocationSkybox(location) {
         if (t < 1) requestAnimationFrame(fade);
       }
       requestAnimationFrame(fade);
-      statusEl.textContent = `360° Scene Active: ${location.name} — Click glowing reticles or use the Visor HUD.`;
+      statusEl.textContent = `360° Scene Active: ${location.name} — Click a spot to drop a pin, then Investigate.`;
     },
     undefined,
     () => {
@@ -186,11 +194,7 @@ renderer.setAnimationLoop(() => {
   if (!renderer.xr.isPresenting) {
     const phi = THREE.MathUtils.degToRad(90 - lat);
     const theta = THREE.MathUtils.degToRad(lon);
-    camera.lookAt(
-      500 * Math.sin(phi) * Math.cos(theta),
-      500 * Math.cos(phi),
-      500 * Math.sin(phi) * Math.sin(theta)
-    );
+    camera.lookAt(500 * Math.sin(phi) * Math.cos(theta), 500 * Math.cos(phi), 500 * Math.sin(phi) * Math.sin(theta));
   }
   hotspots.update(clock.getElapsedTime());
   renderer.render(scene, camera);
@@ -210,7 +214,7 @@ const charSelect = new CharacterSelect(resolver, async ({ location, character, l
   visorHud.show();
 
   loadLocationSkybox(location);
-  await tts.speak("", { role: "Narrator", speaker: "narrator", intent: "intro" });
+  await tts.speak("", { role: "Narrator", speaker: "narrator", intent: "intro", cacheOnly: true });
 });
 
 document.getElementById("hud-inspect-btn").onclick = () => runInspect();

@@ -192,7 +192,8 @@ export class ElevenLabsClient {
     }
     if ("speechSynthesis" in window && text) {
       this.onStatus(`WEB SPEECH BACKUP (${reason})`);
-      window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+      const spokenText = text.replace(/\[[^\]]+\]/g, "").replace(/\s+/g, " ").trim();
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(spokenText));
       return { engine: "webspeech-backup", reason };
     }
     this.onStatus(`TEXT-ONLY (${reason})`);

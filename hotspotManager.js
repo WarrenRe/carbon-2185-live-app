@@ -1,4 +1,4 @@
-// hotspotManager.js — 360° Pin-Drop Rings, Seated Grab-to-Spin, -45° Always-On-Top Translucent VR HUD & VR Item Showcase
+// hotspotManager.js — 360° Pin-Drop Rings, Seated Grab-to-Spin, -45° VR HUD (Exact Shadow + 3D Laser Beams) & VR Item Showcase
 import * as THREE from "three";
 
 const PIN_RADIUS = 38;
@@ -248,9 +248,10 @@ export class HotspotManager {
     this.vrGroup = new THREE.Group();
     this.vrGroup.visible = false;
 
-    const shadowMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ color: 0x000000 }), 0.55);
-    const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.26, 0.58), shadowMat);
-    shadowPlane.position.set(0.02, -0.02, -0.045);
+    // Exact-dimension drop shadow offset tightly right & down (~2px visual offset)
+    const shadowMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ color: 0x000000 }), 0.6);
+    const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.20, 0.52), shadowMat);
+    shadowPlane.position.set(0.008, 0.012, -0.029);
     shadowPlane.renderOrder = 900;
     this.vrGroup.add(shadowPlane);
 
@@ -331,11 +332,12 @@ export class HotspotManager {
     this.vrInspectGroup.rotation.y = -0.28;
     this.vrInspectGroup.visible = false;
 
+    // Exact-dimension drop shadow offset tightly right & down
     const cardShadow = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.68, 0.84),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55, depthTest: false, depthWrite: false })
+      new THREE.PlaneGeometry(0.64, 0.80),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6, depthTest: false, depthWrite: false })
     );
-    cardShadow.position.set(0.02, -0.02, -0.045);
+    cardShadow.position.set(0.006, -0.006, -0.031);
     cardShadow.renderOrder = 910;
     this.vrInspectGroup.add(cardShadow);
 
@@ -425,6 +427,7 @@ export class HotspotManager {
 
       const body =
         entity.lore_bio_stats ||
+        entity.stats_lore ||
         entity.visual_description_for_image_gen ||
         entity.description ||
         "No tactical specs logged.";
@@ -576,18 +579,37 @@ export class HotspotManager {
       if (domeHits.length) this.dropPinAtWorldPoint(domeHits[0].point);
     };
 
-    const rayGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, 0, -12),
-    ]);
+    // Visible 3D laser beam cylinder (unit length along -Z, scaled dynamically to hit distance)
+    const beamGeo = new THREE.CylinderGeometry(0.0028, 0.0028, 1, 8, 1, true);
+    beamGeo.rotateX(-Math.PI / 2);
+    beamGeo.translate(0, 0, -0.5);
+    const dotGeo = new THREE.SphereGeometry(0.011, 12, 12);
 
     [0, 1].forEach((idx) => {
       const ctrl = this.renderer.xr.getController(idx);
-      const rayMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, depthTest: false });
-      const rayLine = new THREE.Line(rayGeo, rayMat);
-      rayLine.renderOrder = 920;
-      ctrl.add(rayLine);
+      const rayMat = new THREE.MeshBasicMaterial({
+        color: 0x00f0ff,
+        transparent: true,
+        opacity: 0.9,
+        depthTest: false,
+        depthWrite: false,
+      });
+
+      const rayBeam = new THREE.Mesh(beamGeo, rayMat);
+      rayBeam.scale.set(1, 1, 12);
+      rayBeam.renderOrder = 950;
+      rayBeam.frustumCulled = false;
+      ctrl.add(rayBeam);
+
+      const rayDot = new THREE.Mesh(dotGeo, rayMat);
+      rayDot.position.set(0, 0, -12);
+      rayDot.renderOrder = 951;
+      rayDot.frustumCulled = false;
+      ctrl.add(rayDot);
+
       ctrl.userData.rayMat = rayMat;
+      ctrl.userData.rayBeam = rayBeam;
+      ctrl.userData.rayDot = rayDot;
 
       ctrl.addEventListener("select", () => handleSelect(ctrl));
 
@@ -618,8 +640,14 @@ export class HotspotManager {
       if (this.grabbingCtrl === ctrl) continue;
       this._setRayFromController(ctrl);
       const hits = this.raycaster.intersectObjects(panelTargets, false);
+
       if (hits.length) {
         anyHudHit = true;
+        const dist = Math.max(0.1, hits[0].distance);
+        ctrl.userData.rayBeam.scale.set(1, 1, dist);
+        ctrl.userData.rayDot.position.set(0, 0, -dist);
+        ctrl.userData.rayDot.visible = true;
+
         if (interactiveBtns.includes(hits[0].object)) {
           hitBtn = hits[0].object;
           ctrl.userData.rayMat.color.setHex(0x34d399);
@@ -627,6 +655,9 @@ export class HotspotManager {
           ctrl.userData.rayMat.color.setHex(0xffffff);
         }
       } else {
+        ctrl.userData.rayBeam.scale.set(1, 1, 12);
+        ctrl.userData.rayDot.position.set(0, 0, -12);
+        ctrl.userData.rayDot.visible = true;
         ctrl.userData.rayMat.color.setHex(0x00f0ff);
       }
     }

@@ -227,6 +227,7 @@ renderer.setAnimationLoop(() => {
 
 // --- 7. Character Select Launch ---
 const charSelect = new CharacterSelect(resolver, async ({ location, character, level }) => {
+  tts;
   gameState.character = character;
   gameState.level = level;
 

@@ -1,4 +1,4 @@
-// hotspotManager.js — 360° Pin-Drop Rings, Seated Grab-to-Spin, -45° Translucent VR HUD (25%/100% Eye Toggle) & VR Item Showcase
+// hotspotManager.js — 360° Pin-Drop Rings, Seated Grab-to-Spin, -45° Always-On-Top Translucent VR HUD & VR Item Showcase
 import * as THREE from "three";
 
 const PIN_RADIUS = 38;
@@ -52,7 +52,6 @@ function drawEyeButtonCanvas(canvas, isFullOpacity) {
   ctx.lineWidth = 6;
   ctx.strokeRect(4, 4, 172, 88);
 
-  // Vector eye icon
   ctx.strokeStyle = isFullOpacity ? "#00f0ff" : "#e2f1ff";
   ctx.lineWidth = 4;
   ctx.beginPath();
@@ -61,7 +60,6 @@ function drawEyeButtonCanvas(canvas, isFullOpacity) {
   ctx.quadraticCurveTo(90, 64, 46, 38);
   ctx.stroke();
 
-  // Iris & pupil
   ctx.beginPath();
   ctx.arc(90, 38, 12, 0, Math.PI * 2);
   ctx.fillStyle = isFullOpacity ? "#00f0ff" : "#94a3b8";
@@ -71,7 +69,6 @@ function drawEyeButtonCanvas(canvas, isFullOpacity) {
   ctx.fillStyle = "#050811";
   ctx.fill();
 
-  // Opacity percentage label
   ctx.fillStyle = isFullOpacity ? "#00f0ff" : "#cbd5e1";
   ctx.font = "bold 18px monospace";
   ctx.textAlign = "center";
@@ -116,7 +113,6 @@ export class HotspotManager {
     this.pointer = new THREE.Vector2();
     this.downPos = { x: 0, y: 0 };
 
-    // Invisible 360° sphere inside worldGroup so pins stay aligned when spinning the room
     const hitGeo = new THREE.SphereGeometry(PIN_RADIUS, 32, 24);
     hitGeo.scale(-1, 1, 1);
     this.hitSphere = new THREE.Mesh(hitGeo, new THREE.MeshBasicMaterial({ visible: false }));
@@ -127,16 +123,14 @@ export class HotspotManager {
     this.pinGroup = null;
     this.activePinDir = null;
 
-    // VR grab-to-spin & hover state
     this.controllers = [];
     this.grabbingCtrl = null;
     this.lastGrabAngle = 0;
-    this._vrFullOpacity = false; // Default 25% opacity; eye button toggles 100%
+    this._vrFullOpacity = false;
     this._vrHudMaterials = [];
     this._vrHudHovered = false;
     this._hoveredBtn = null;
 
-    // VR scan animation & inspect card state
     this._vrScanInterval = null;
     this._inspectLoadId = 0;
     this._hudInitialized = false;
@@ -159,6 +153,8 @@ export class HotspotManager {
 
   _registerHudMaterial(mat, baseMultiplier = 1.0) {
     mat.transparent = true;
+    mat.depthTest = false;
+    mat.depthWrite = false;
     mat.userData.baseOpacity = baseMultiplier;
     this._vrHudMaterials.push(mat);
     return mat;
@@ -205,15 +201,21 @@ export class HotspotManager {
 
     const outerGeo = new THREE.RingGeometry(OUTER_RING_WORLD - 0.25, OUTER_RING_WORLD, 48);
     const outerMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
-    this.pinGroup.add(new THREE.Mesh(outerGeo, outerMat));
+    const outerMesh = new THREE.Mesh(outerGeo, outerMat);
+    outerMesh.renderOrder = 10;
+    this.pinGroup.add(outerMesh);
 
     const innerGeo = new THREE.RingGeometry(INNER_RING_WORLD - 0.22, INNER_RING_WORLD, 36);
     const innerMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
-    this.pinGroup.add(new THREE.Mesh(innerGeo, innerMat));
+    const innerMesh = new THREE.Mesh(innerGeo, innerMat);
+    innerMesh.renderOrder = 11;
+    this.pinGroup.add(innerMesh);
 
     const dotGeo = new THREE.CircleGeometry(0.65, 20);
     const dotMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, side: THREE.DoubleSide });
-    this.pinGroup.add(new THREE.Mesh(dotGeo, dotMat));
+    const dotMesh = new THREE.Mesh(dotGeo, dotMat);
+    dotMesh.renderOrder = 12;
+    this.pinGroup.add(dotMesh);
 
     this.worldGroup.add(this.pinGroup);
 
@@ -227,6 +229,7 @@ export class HotspotManager {
     const sprite = new THREE.Sprite(mat);
     sprite.position.set(poi.dir.x, poi.dir.y, poi.dir.z).multiplyScalar(PIN_RADIUS - 1);
     sprite.scale.set(3.8, 3.8, 1);
+    sprite.renderOrder = 20;
     this.markersGroup.add(sprite);
   }
 
@@ -236,48 +239,39 @@ export class HotspotManager {
     const sprite = new THREE.Sprite(mat);
     sprite.position.set(pinDir.x, pinDir.y, pinDir.z).multiplyScalar(PIN_RADIUS - 1);
     sprite.scale.set(3.0, 3.0, 1);
+    sprite.renderOrder = 20;
     this.markersGroup.add(sprite);
   }
 
-  // --- -45° Translucent, Depth-Layered, Yaw-Following 3D VR Visor HUD ---
+  // --- -45° Always-On-Top Translucent 3D VR Visor HUD ---
   _buildVRHud() {
     this.vrGroup = new THREE.Group();
     this.vrGroup.visible = false;
 
-    // Soft drop-shadow backing for depth
-    const shadowMat = this._registerHudMaterial(
-      new THREE.MeshBasicMaterial({ color: 0x000000, depthWrite: false }),
-      0.55
-    );
+    const shadowMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ color: 0x000000 }), 0.55);
     const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.26, 0.58), shadowMat);
     shadowPlane.position.set(0.02, -0.02, -0.045);
+    shadowPlane.renderOrder = 900;
     this.vrGroup.add(shadowPlane);
 
-    // 3D translucent bezel backing
-    const bezelMat = this._registerHudMaterial(
-      new THREE.MeshBasicMaterial({ color: 0x071022, depthWrite: false }),
-      0.85
-    );
+    const bezelMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ color: 0x071022 }), 0.85);
     const bezel = new THREE.Mesh(new THREE.BoxGeometry(1.20, 0.52, 0.02), bezelMat);
     bezel.position.set(0, 0.02, -0.018);
+    bezel.renderOrder = 901;
     this.vrGroup.add(bezel);
     this.vrBackdropMesh = bezel;
 
-    // Main telemetry readout canvas
     this.vrCanvas = document.createElement("canvas");
     this.vrCanvas.width = 768; this.vrCanvas.height = 256;
     this.vrTex = new THREE.CanvasTexture(this.vrCanvas);
     this.vrTex.colorSpace = THREE.SRGBColorSpace;
 
-    const screenMat = this._registerHudMaterial(
-      new THREE.MeshBasicMaterial({ map: this.vrTex, depthWrite: false }),
-      1.0
-    );
+    const screenMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ map: this.vrTex }), 1.0);
     this.vrScreenMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.14, 0.36), screenMat);
     this.vrScreenMesh.position.set(0, 0.09, 0.004);
+    this.vrScreenMesh.renderOrder = 902;
     this.vrGroup.add(this.vrScreenMesh);
 
-    // Raised 3D action buttons + Eye Opacity Toggle
     this.vrButtons = [];
     const defs = [
       { label: "INVESTIGATE", skill: "Investigation", x: -0.40, w: 0.30, color: "#00f0ff" },
@@ -285,46 +279,40 @@ export class HotspotManager {
       { label: "ATTACK", skill: "Attack", x: 0.19, w: 0.24, color: "#ff2a85" },
     ];
     defs.forEach((d) => {
-      const btnBaseMat = this._registerHudMaterial(
-        new THREE.MeshBasicMaterial({ color: 0x020617, depthWrite: false }),
-        0.9
-      );
+      const btnBaseMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ color: 0x020617 }), 0.9);
       const btnBase = new THREE.Mesh(new THREE.BoxGeometry(d.w, 0.11, 0.018), btnBaseMat);
       btnBase.position.set(d.x, -0.16, 0.01);
+      btnBase.renderOrder = 903;
       this.vrGroup.add(btnBase);
 
       const btnFaceMat = this._registerHudMaterial(
-        new THREE.MeshBasicMaterial({ map: createButtonTexture(d.label, d.color), depthWrite: false }),
+        new THREE.MeshBasicMaterial({ map: createButtonTexture(d.label, d.color) }),
         1.0
       );
       const btnFace = new THREE.Mesh(new THREE.PlaneGeometry(d.w - 0.01, 0.105), btnFaceMat);
       btnFace.position.set(d.x, -0.16, 0.022);
+      btnFace.renderOrder = 904;
       btnFace.userData = { vrSkill: d.skill };
       this.vrGroup.add(btnFace);
       this.vrButtons.push(btnFace);
     });
 
-    // Eye Icon Opacity Toggle button (25% <-> 100%)
     this._eyeCanvas = document.createElement("canvas");
     this._eyeCanvas.width = 180; this._eyeCanvas.height = 96;
     drawEyeButtonCanvas(this._eyeCanvas, this._vrFullOpacity);
     this._eyeTex = new THREE.CanvasTexture(this._eyeCanvas);
     this._eyeTex.colorSpace = THREE.SRGBColorSpace;
 
-    const eyeBaseMat = this._registerHudMaterial(
-      new THREE.MeshBasicMaterial({ color: 0x020617, depthWrite: false }),
-      0.9
-    );
+    const eyeBaseMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ color: 0x020617 }), 0.9);
     const eyeBase = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.11, 0.018), eyeBaseMat);
     eyeBase.position.set(0.44, -0.16, 0.01);
+    eyeBase.renderOrder = 903;
     this.vrGroup.add(eyeBase);
 
-    const eyeFaceMat = this._registerHudMaterial(
-      new THREE.MeshBasicMaterial({ map: this._eyeTex, depthWrite: false }),
-      1.0
-    );
+    const eyeFaceMat = this._registerHudMaterial(new THREE.MeshBasicMaterial({ map: this._eyeTex }), 1.0);
     this.vrEyeBtn = new THREE.Mesh(new THREE.PlaneGeometry(0.17, 0.105), eyeFaceMat);
     this.vrEyeBtn.position.set(0.44, -0.16, 0.022);
+    this.vrEyeBtn.renderOrder = 904;
     this.vrEyeBtn.userData = { vrToggleOpacity: true };
     this.vrGroup.add(this.vrEyeBtn);
 
@@ -336,7 +324,7 @@ export class HotspotManager {
     );
   }
 
-  // --- 3D VR Item Inspection Card (Docked to the right of the VR HUD) ---
+  // --- Always-On-Top 3D VR Item Inspection Card ---
   _buildVRInspectCard() {
     this.vrInspectGroup = new THREE.Group();
     this.vrInspectGroup.position.set(0.86, 0.18, 0.12);
@@ -345,16 +333,18 @@ export class HotspotManager {
 
     const cardShadow = new THREE.Mesh(
       new THREE.PlaneGeometry(0.68, 0.84),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55 })
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55, depthTest: false, depthWrite: false })
     );
     cardShadow.position.set(0.02, -0.02, -0.045);
+    cardShadow.renderOrder = 910;
     this.vrInspectGroup.add(cardShadow);
 
     const cardBezel = new THREE.Mesh(
       new THREE.BoxGeometry(0.64, 0.80, 0.024),
-      new THREE.MeshBasicMaterial({ color: 0x071022 })
+      new THREE.MeshBasicMaterial({ color: 0x071022, depthTest: false, depthWrite: false })
     );
     cardBezel.position.set(0, 0, -0.018);
+    cardBezel.renderOrder = 911;
     this.vrInspectGroup.add(cardBezel);
 
     this.vrInspectCanvas = document.createElement("canvas");
@@ -364,16 +354,18 @@ export class HotspotManager {
 
     const cardFace = new THREE.Mesh(
       new THREE.PlaneGeometry(0.61, 0.77),
-      new THREE.MeshBasicMaterial({ map: this.vrInspectTex })
+      new THREE.MeshBasicMaterial({ map: this.vrInspectTex, depthTest: false, depthWrite: false })
     );
     cardFace.position.set(0, 0, 0.004);
+    cardFace.renderOrder = 912;
     this.vrInspectGroup.add(cardFace);
 
     const closeFace = new THREE.Mesh(
       new THREE.PlaneGeometry(0.16, 0.065),
-      new THREE.MeshBasicMaterial({ map: createButtonTexture("CLOSE [X]", "#ff2a85") })
+      new THREE.MeshBasicMaterial({ map: createButtonTexture("CLOSE [X]", "#ff2a85"), depthTest: false, depthWrite: false })
     );
     closeFace.position.set(0.20, 0.34, 0.022);
+    closeFace.renderOrder = 913;
     closeFace.userData = { vrCloseInspect: true };
     this.vrInspectGroup.add(closeFace);
     this.vrCloseBtn = closeFace;
@@ -557,7 +549,6 @@ export class HotspotManager {
     const handleSelect = (ctrl) => {
       this._setRayFromController(ctrl);
 
-      // 1. Check VR Item Inspect Close [X] button
       if (this.vrInspectGroup.visible) {
         const closeHits = this.raycaster.intersectObject(this.vrCloseBtn, false);
         if (closeHits.length) {
@@ -566,25 +557,21 @@ export class HotspotManager {
         }
       }
 
-      // 2. Check Eye Opacity Toggle button (25% <-> 100%)
       const eyeHits = this.raycaster.intersectObject(this.vrEyeBtn, false);
       if (eyeHits.length) {
         this.toggleVROpacity();
         return;
       }
 
-      // 3. Check 3D VR Visor HUD action buttons
       const btnHits = this.raycaster.intersectObjects(this.vrButtons, false);
       if (btnHits.length) {
         this.onVrAction(btnHits[0].object.userData.vrSkill);
         return;
       }
 
-      // 4. Ignore accidental clicks on the HUD panel body so they don't drop a pin behind it
       const panelHits = this.raycaster.intersectObjects([this.vrScreenMesh, this.vrBackdropMesh], false);
       if (panelHits.length) return;
 
-      // 5. Otherwise drop pin on the 360° dome
       const domeHits = this.raycaster.intersectObject(this.hitSphere, false);
       if (domeHits.length) this.dropPinAtWorldPoint(domeHits[0].point);
     };
@@ -596,13 +583,14 @@ export class HotspotManager {
 
     [0, 1].forEach((idx) => {
       const ctrl = this.renderer.xr.getController(idx);
-      const rayMat = new THREE.LineBasicMaterial({ color: 0x00f0ff });
-      ctrl.add(new THREE.Line(rayGeo, rayMat));
+      const rayMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, depthTest: false });
+      const rayLine = new THREE.Line(rayGeo, rayMat);
+      rayLine.renderOrder = 920;
+      ctrl.add(rayLine);
       ctrl.userData.rayMat = rayMat;
 
       ctrl.addEventListener("select", () => handleSelect(ctrl));
 
-      // Grip (squeeze) grabs and spins the 360° room for seated play
       ctrl.addEventListener("squeezestart", () => {
         this.grabbingCtrl = ctrl;
         this.lastGrabAngle = this._getControllerAzimuth(ctrl);
@@ -634,16 +622,15 @@ export class HotspotManager {
         anyHudHit = true;
         if (interactiveBtns.includes(hits[0].object)) {
           hitBtn = hits[0].object;
-          ctrl.userData.rayMat.color.setHex(0x34d399); // Green laser when locked on a button
+          ctrl.userData.rayMat.color.setHex(0x34d399);
         } else {
-          ctrl.userData.rayMat.color.setHex(0xffffff); // White laser when pointing at HUD panel
+          ctrl.userData.rayMat.color.setHex(0xffffff);
         }
       } else {
         ctrl.userData.rayMat.color.setHex(0x00f0ff);
       }
     }
 
-    // Subtle scale pop on the hovered button
     for (const btn of interactiveBtns) {
       const targetScale = btn === hitBtn ? 1.07 : 1.0;
       btn.scale.set(targetScale, targetScale, 1);
@@ -680,7 +667,6 @@ export class HotspotManager {
     xrCam.getWorldPosition(this._tmpCamPos);
     xrCam.getWorldQuaternion(this._tmpCamQuat);
 
-    // Follow horizontal yaw only so looking down to use the menu doesn't push it away
     this._tmpForward.set(0, 0, -1).applyQuaternion(this._tmpCamQuat);
     this._tmpForward.y = 0;
     if (this._tmpForward.lengthSq() < 0.0001) {
@@ -689,7 +675,6 @@ export class HotspotManager {
       this._tmpForward.normalize();
     }
 
-    // -45° pitch below eye level; gently nudges slightly closer when pointed at
     const dist = this._vrHudHovered ? 1.15 : 1.28;
     const pitchRad = THREE.MathUtils.degToRad(-45);
     const horizDist = dist * Math.cos(pitchRad);
@@ -698,7 +683,6 @@ export class HotspotManager {
     this._tmpTargetPos.copy(this._tmpCamPos).addScaledVector(this._tmpForward, horizDist);
     this._tmpTargetPos.y += vertOffset;
 
-    // Orient +Z directly toward the viewer's eyes so text and buttons face the user
     this._tmpLookMatrix.lookAt(this._tmpCamPos, this._tmpTargetPos, this._upVec);
     this._tmpTargetQuat.setFromRotationMatrix(this._tmpLookMatrix);
 
@@ -707,7 +691,6 @@ export class HotspotManager {
       this.vrGroup.quaternion.copy(this._tmpTargetQuat);
       this._hudInitialized = true;
     } else {
-      // Freeze/slow yaw drift while actively pointing at the menu for steady clicking
       const followRate = this._vrHudHovered ? 0.025 : 0.09;
       this.vrGroup.position.lerp(this._tmpTargetPos, followRate);
       this.vrGroup.quaternion.slerp(this._tmpTargetQuat, followRate);

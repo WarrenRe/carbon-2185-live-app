@@ -441,6 +441,7 @@ export class CharacterSelect {
         await this.tts.speak(line, {
           role,
           speaker: slug,
+          voiceId: char.elevenlabs_voice_id || undefined,
           intent: "flavor",
           cacheOnly: !this.liveVoicePreview,
         });

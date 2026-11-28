@@ -239,7 +239,20 @@ const charSelect = new CharacterSelect(resolver, async ({ location, character, l
   visorHud.show();
 
   loadLocationSkybox(location);
-  await tts.speak("", { role: "Narrator", speaker: "narrator", intent: "intro", cacheOnly: true });
+ skyMat.map = tex; skyMat.color.setHex(0xffffff); skyMat.transparent = true; skyMat.opacity = 0; skyMat.needsUpdate = true;
+      fallbackGrid.visible = false;
+      const start = performance.now();
+      function fade(now) {
+        const t = Math.min(1, (now - start) / 500);
+        skyMat.opacity = t;
+        if (t < 1) {
+          requestAnimationFrame(fade);
+        } else {
+          skyMat.transparent = false;
+          skyMat.needsUpdate = true;
+        }
+      }
+      requestAnimationFrame(fade);
 });
 
 document.getElementById("hud-inspect-btn").onclick = () => runInspect();
